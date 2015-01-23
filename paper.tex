@@ -450,10 +450,10 @@ SQL databases are an integral part of many (web) applications. They provide stro
 This can essentially be distilled into two separate problems:
 \begin{itemize}
   \item{Given the deployment of a new version of a web application, depending on the deployment strategy it might be required that both the old and the new version of the application run in parallel (\textit{Rolling Upgrades}, or \textit{Canary Releases}). This means that the schema on the SQL database needs to be compatible with the schema expected by both the old and the new application.}
-  \item{Operations which modify the schema in SQL databases (\textit{DDL statements}), depending on the SQL database implementation may be either non-blocking, or blocking in nature. In case of non-blocking DDL statements queries issued by the application for instance may proceed, whereas with blocking DDL statements these queries may be put on hold for the duration of the schema modification. This disruption can range anywhere from milliseconds to hours depending on the DDL statement, the size of the affected table, and database implementation. One such example would be adding a new non-nullable column to a PostgreSQL database. This operation is blocking in nature --- preventing other queries from running while it is being executed --- and when applied to a table of 100 million rows (in our tests) blocked other queries from running on that table for 2.5 minutes.}
+  \item{Operations which modify the schema in SQL databases (\textit{DDL statements}), depending on the SQL database implementation may be either non-blocking, or blocking in nature. In case of non-blocking DDL statements queries issued by the application for instance may proceed, whereas with blocking DDL statements these queries may be put on hold for the duration of the schema modification. This disruption can range anywhere from milliseconds to hours depending on the DDL statement, the size of the affected table, and database implementation. One such example would be adding a new non-nullable column to a PostgreSQL database. This operation is blocking in nature --- preventing other queries from running while it is being executed --- and when applied to a table of 50 million rows (in our tests) blocked other queries from running on that table for 2.5 minutes.}
 \end{itemize}
 
-When service windows are unavailable, these two problems make releasing applications often, problematic for release engineers. To address this problem we aim to find or implement tooling which would allow its users to not only version their database schema, but also evolve their database schema without affecting older and still running applications.
+When service windows are unavailable, these two problems make releasing applications frequently, problematic for release engineers. To address this problem we aim to find or implement tooling which would allow its users to not only version their database schema, but also evolve their database schema without affecting older and still running applications.
 
 \section{State of the art} %(0.7)
 
@@ -509,9 +509,7 @@ We feel that the current situation is an impediment to adoption and growth of \t
 
 \subsection{Solution direction}
 
-We have come up with an approach which combines approaches 1 and 3. The previously discussed tools from practice all use approach 1, and prove that this is a viable way for performing simple evolutions of the database schema. These tools all create a single ghost table, whereas we aim to create one ghost table for each table that is under change, and ghost tables for all tables which in turn are dependent on these tables under change. This approach ensures that we do not violate any previously defined foreign keys.
-
-\textbf{Show image an example here?}
+We have come up with an approach which combines approaches 1 and 3. The previously discussed tools from practice all use approach 1, and prove that this is a viable way for performing simple evolutions of the database schema. These tools all create a single ghost table, whereas we aim to create one ghost table for each table that is under change, and ghost tables for all tables which in turn are dependent on these tables under change (see Figure~\ref{fig:migration-stages}). This approach ensures that we do not violate any previously defined foreign keys.
 
 In addition, the tools from practice all allow release engineers to switch the table names manually after the the original and the ghost table have been synchronized. This is good since it allows for two or more versions of the application to co-exist on the same database as long as each version correctly queries the correct (ghost)table. Although the current tools from practice do not solve this specific problem, we think that this is easily solved using a small wrapper around database drivers for most programming languages. Alternatively, for software engineers working on the application we could expose which (ghost)table should be queried for a specific version of the database schema, when writing SQL queries.
 
@@ -520,6 +518,17 @@ In addition, the tools from practice all allow release engineers to switch the t
 \subsection{Current status}
 
 We are implementing a new tool --- QuantumDB~\cite{QuantumDB} --- which aims to address the need for non-blocking schema evolution, and remove obstacles for teams who want to adopt \textit{Continuous Deployment} but struggle because of their SQL database(s). Although not yet usable in production environments, we have implemented enough features at the moment to take a step back and evaluate QuantumDB in an small experiment. 
+
+\begin{figure}%
+    \centering
+    \subfloat[Before migration]{{\includegraphics[width=3.2in]{pre-migration-state.png} }}%
+    \qquad
+    \subfloat[During migration]{{\includegraphics[width=3.2in]{in-migration-state.png} }}%
+    \qquad
+    \subfloat[After migration]{{\includegraphics[width=3.2in]{post-migration-state.png} }}%
+    \caption{Query performance of demo application before and during migration}%
+    \label{fig:migration-stages}%
+\end{figure}
 
 QuantumDB currently consists of two parts: 
 \begin{itemize}
@@ -534,7 +543,7 @@ With QuantumDB we can currently take one of the active database schemas, apply a
 We feel it is important to validate our approach at an early stage. Although QuantumDB is far from ready, we setup a small experiment to verify that the concept and our implementation of it works, and that it can match the capabilities of the tools offered in practice. 
 
 \subsection{Setup}
-We have installed PostgreSQL 9.3 and a test application --- available on GitHub~\cite{QuantumDB-RelEng-Demo} --- on a server with a 4-core Intel Core i7-3770, a 1TB hard disk, and 16GB memory. The test application inserts 100 million records into a single table called ``users'' and starts a simple demo application with two threads which continuously query and manipulate the data in that table using SELECT, INSERT, UPDATE, and DELETE statements. It then uses one of two methods to add a non nullable column to the ``users'' table. During this process we keep track of the performance of the queries issued by the demo application and how long each method takes to complete. 
+We have installed PostgreSQL 9.3 and a test application --- available on GitHub~\cite{QuantumDB-RelEng-Demo} --- on a server with a 4-core Intel Core i7-3770, a 1TB hard disk, and 16GB memory. The test application inserts 50 million records into a single table called ``users'' and starts a simple demo application with two threads which continuously query and manipulate the data in that table using SELECT, INSERT, UPDATE, and DELETE statements. It then uses one of two methods to add a non nullable column to the ``users'' table. During this process we keep track of the performance of the queries issued by the demo application and how long each method takes to complete. 
 
 The ``naive'' approach simply executes an ``\textit{ALTER TABLE users ADD COLUMN}'' query to add the new column to the database. Once this query has completed, we can start a new demo application which can operate on the new structure of the ``users'' table. Since the new structure of the ``users'' table is compatible with both the old and the new version of the demo application they can run in parallel to each other, allowing for any kind of deployment method to be used. 
 
