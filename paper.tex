@@ -414,7 +414,10 @@
 \begin{abstract}
 %\boldmath
 
-Continuous Deployment is a hot topic. It holds much promise for developing and deploying software applications. However both software and release engineers face various challenges when adopting this practice. In our view, the biggest technical challenge in the development and deployment of software (which uses SQL databases to store persistent data), is evolving the database schema of SQL databases without disrupting the applications connected to the database. In this paper we explore tools, and approaches to address this problem.
+Continuous Deployment is an important enabler rapid delivery of business value and early end user feedback. While frequent code deployment is well understood, the impact of frequent change on persistent data is less understood and supported. SQL schema evolutions in particular can make it expensive to deploy a new version, and may even lead to downtime if schema changes can only be applied by blocking operations.
+
+In this paper we study the problem of continuous deployment in the presence of database schema evolution in more detail. We identify a number of shortcomings to existing solutions and tools, mostly related to avoidable down time and support for foreign keys. We propose a novel approach to address these problems, and provide an open source implementation. Initial evaluation suggests the approach is effective and sufficiently efficient.
+
 
 \end{abstract}
 % IEEEtran.cls defaults to using nonbold math in the Abstract.
