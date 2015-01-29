@@ -392,7 +392,7 @@
   }
   \IEEEauthorblockA{
     Delft University of Technology,\\
-    Delft, Netherlands\\ \\
+    Delft, The Netherlands\\ \\
     Email: M.deJong-2@student.tudelft.nl\IEEEauthorrefmark{1}\\
     Email: Arie.vanDeursen@tudelft.nl\IEEEauthorrefmark{2}\\ \\
     \today{}
@@ -414,7 +414,10 @@
 \begin{abstract}
 %\boldmath
 
-Continuous Deployment is a hot topic. It holds much promise for developing and deploying software applications. However both software and release engineers face various challenges when adopting this practice. In our view, the biggest technical challenge in the development and deployment of software (which uses SQL databases to store persistent data), is evolving the database schema of SQL databases without disrupting the applications connected to the database. In this paper we explore tools, and approaches to address this problem.
+Continuous Deployment is an important enabler of rapid delivery of business value and early end user feedback. While frequent code deployment is well understood, the impact of frequent change on persistent data is less understood and supported. SQL schema evolutions in particular can make it expensive to deploy a new version, and may even lead to downtime if schema changes can only be applied by blocking operations.
+
+In this paper we study the problem of continuous deployment in the presence of database schema evolution in more detail. We identify a number of shortcomings to existing solutions and tools, mostly related to avoidable downtime and support for foreign keys. We propose a novel approach to address these problems, and provide an open source implementation. Initial evaluation suggests the approach is effective and sufficiently efficient.
+
 
 \end{abstract}
 % IEEEtran.cls defaults to using nonbold math in the Abstract.
@@ -447,55 +450,61 @@ Continuous Deployment is a hot topic. It holds much promise for developing and d
 % * Blocking nature of DDL statements.
 % * Continuous Deployment and partial deployments.
 
-SQL databases are an integral part of many (web) applications. They provide strong guarantees about the storage and retrieval of persistent data which makes them useful for various software applications. However the environment of software and release engineers is drastically changing: shorter development iterations, more frequent deployments to the production environment, or even fully automated deployments to the production environments several times a day. For release engineers this brings additional challenges. In particular when evolving the database schema (tables, columns, foreign keys, constraints, etc) of the SQL database, or rolling back such changes without loss of data.
+SQL databases are an integral part of many (web) applications. They provide strong guarantees about the storage and retrieval of persistent data which makes them useful for various software applications. 
 
-We can distill these challenges into two separate problems:
-\begin{itemize}
-  \item{Given the deployment of a new version of a (web) application, depending on the deployment strategy it might be required that both the old and the new version of the application run in parallel (\textit{Rolling Upgrades}, or \textit{Canary Releases}~\cite{Humble:2010:CDR:1869904}). This means that the schema on the SQL database needs to be compatible with the schema expected by both the old and the new version of the application.}
-  \item{Operations which modify the database schema in a SQL database (\textit{DDL statements}) can be either non-blocking or blocking in nature, depending on the implementation of the operations in that specific SQL database. In case of non-blocking \textit{DDL statements}, SQL queries issued by the application may proceed, whereas with blocking \textit{DDL statements} these queries may be put on hold for the duration of the operation. This disruption can range from milliseconds to hours depending on the schema operation, the size of the affected table(s), and database implementation. One such example would be adding a new non-nullable column to an existing table in a PostgreSQL database. This operation is blocking in nature, preventing other queries from running while it is being executed. When applied to a table of 50 million records (see Section~\ref{sec:results}), the queries from the application can be blocked for 2.5 minutes.}
-\end{itemize}
+For release engineers, the persistence of the data and especially the structure of this data as embedded in the application's SQL schema is at odds with today's need for continuous deployment. Challenges include combining zero downtime constraints with evolving database schemas (affecting tables, columns, foreign keys, constraints, etc.), and the need to be able to rollback changes without loss of data.
 
-When service windows are short or even non-existent, these two problems make releasing new versions of applications frequently, problematic for release engineers. To address this problem we aim to find or implement a tool which would allow its users to not only alter their database schema in a non-blocking fashion, but also do this without affecting older and still running applications.
+We can distill the challenge of continuous delivery in the presence of schema evolution into two separate problems:
 
-\section{State of the art} %(0.7)
+First, given the deployment of a new version of a (web) application, depending on the deployment strategy it might be required that both the old and the new version of the application run in parallel (\textit{Rolling Upgrades}, or \textit{Canary Releases}~\cite{Humble:2010:CDR:1869904}). This means that the schema on the SQL database needs to be compatible with the schema expected by both the old and the new version of the application.
+
+Second, operations which modify the database schema in a SQL database (\textit{DDL statements}) can be either non-blocking or blocking in nature, depending on the implementation of the operations in that specific SQL database. In case of non-blocking \textit{DDL statements}, SQL queries issued by the application may proceed, whereas with blocking \textit{DDL statements} these queries may be put on hold for the duration of the operation. This disruption can range from milliseconds to hours depending on the schema operation, the size of the affected table(s), and the database implementation. One such example would be adding a new non-nullable column to an existing table in a PostgreSQL database. This operation is blocking in nature, preventing other queries from running while it is being executed. When applied to a table of 50 million records (see Section~\ref{sec:results}), the queries from the application can be blocked for 2.5 minutes.
+
+
+When service windows are short or even non-existent, these two problems make releasing new versions of applications frequently problematic for release engineers. To address this problem we aim to find or implement a tool which allows its users to not only alter their database schema in a non-blocking fashion, but also do this without affecting older applications still operating on the older version of the schema.
+
+\section{State of the Art} %(0.7)
 
 % * Manual approach
 % * Automated tools in academia and industry
 % * Limitations of approaches
 
-We first examined existing approaches, tools, and research which aim to solve these problems. A good starting point is the seminal book ``Continuous Delivery''~\cite{Humble:2010:CDR:1869904}. This book describes three high-level approaches to deal with migrating data without loss of data or requiring downtime:
+\subsection{Continuous Delivery}\label{sec:cd}
+
+We first examine existing approaches, tools, and research aiming to solve these problems. Our starting point is the seminal book ``Continuous Delivery''~\cite{Humble:2010:CDR:1869904}. This book describes three high-level approaches to deal with migrating data without loss of data or requiring downtime:
 
 \begin{itemize}
   \item{\textbf{Approach 1}: Copy the database or schema and start recording transactions. When the copying has completed, apply the schema changes to the copied database or schema. Finally replay all the recorded database transactions on the copied database or schema to reach an equivalent state. Once this state has been achieved, it must either be maintained by continuing to record and playback transactions, or make the switch from the old to the new database or schema.}
   \item{\textbf{Approach 2}: When using \textit{Blue-Green deployments}, two instances of the database are available. Take the inactive database and apply the schema operations to it. In the mean time these two databases need to be kept synchronized. This can be done by using approach 1, or somehow ensure that the table under change remains in a read-only state until the active and inactive databases have switched roles.}
-  \item{\textbf{Approach 3}: The last is an approach where schema operations are performed separately from your application deployments using operations which are non-blocking. As a consequence the application must be able to deal with either the old or the new database schema being in use, and construct SQL queries which can operate correctly on both schemas.}
+  \item{\textbf{Approach 3}: The last is an approach where schema operations are performed separately from the application deployments using operations which are non-blocking. As a consequence the application must be able to deal with either the old or the new database schema being in use, and construct SQL queries which can operate correctly on both schemas.}
 \end{itemize}
 
-\subsection{Current tooling} 
+\subsection{Current Tooling} 
 Since evolving the schema of a database and coordinating the deployment of software are both complex tasks, we looked for tooling which could help automate this for software and release engineers.
 
 \subsubsection{Percona Toolkit~\cite{PerconaToolkit} \& Openark Kit~\cite{OpenarkKit}}
-are tools designed to help DBAs perform administrative tasks on MySQL databases. \textit{oak-online-alter-table} and \textit{pt-online-schema-change} respectively are commands which create an empty copy of the a specified table (a ghost table) and apply schema operations on ghost table. These commands then proceed to install triggers on both tables, which insert, update, or delete the corresponding record in the other table when a record in their own table is inserted, updated, or deleted. A background task iterates over all records in the original table (in batches) and lazily copies records from the original table to the ghost table. When all records have been copied the original table and ghost table switch names atomically, ensuring that clients now use the ghost table when querying the original table name.
+These are tools designed to help DBAs perform administrative tasks on MySQL databases. The commands \textit{oak-online-alter-table} and \textit{pt-online-schema-change} create an empty copy of the a specified table (a ghost table) and apply schema operations to the ghost table. These commands then proceed to install triggers on both tables, which insert, update, or delete the corresponding record in the other table when a record in their own table is inserted, updated, or deleted. A background task iterates over all records in the original table (in batches) and lazily copies records from the original table to the ghost table. When all records have been copied the original table and ghost table switch names atomically, ensuring that clients now use the ghost table when querying the original table name.
 
 \subsubsection{TableMigrator~\cite{TableMigrator}}
-is a tool which works very similar to Openark Kit and Percona Toolkit. But instead of using triggers to synchronize the two tables with each other,  TableMigrator requires tables to have an additional column which stores the date and time that record was last modified. Using this information corresponding records in both tables are synchronized with each other by passing over all records in multiple passes. Once a pass can be done relatively quickly, TableMigrator acquires an exclusive write lock on the original table --- blocking the entire table --- and proceeds to do a final pass. Once this has been done, it atomically swaps the names of the original and ghost table before releasing the write lock. Since this final pass can be done quickly, any application executing queries on that table is only very briefly blocked.
+This is a tool which works like Openark Kit and Percona Toolkit. Instead of using triggers to synchronize the two tables with each other,  TableMigrator requires tables to have an additional column which stores the date and time that record was last modified. Using this information corresponding records in both tables are synchronized with each other by passing over all records in multiple passes. Once a pass can be done relatively quickly, TableMigrator acquires an exclusive write lock on the original table --- blocking the entire table --- and proceeds to do a final pass. Once this has been done, it atomically swaps the names of the original and ghost table before releasing the write lock. Since this final pass can be done quickly, any application executing queries on that table is only very briefly blocked.
 
 \subsubsection{SoundCloud's Large Hadron Migrator~\cite{SoundcloudLHM} \& Facebook's Online Schema Change~\cite{FacebookOSC}}
-are both tools which closely follow approach 1. These tools create a copy of a table (including its contents) and record modifications to records in the original table using triggers into a special ``deltas'' table. Once they have copied the original table and its contents, they apply the specified schema operations to the ghost table before proceeding to replay the recorded modifications from the ``deltas'' table onto the ghost table. When the ``deltas'' table is almost empty, these tools acquire an exclusive write lock on the original table --- like \textit{TableMigrator} does --- and apply the last of the recorded modifications before atomically switch the names of both tables.
+These are both tools which closely follow Approach~1 described earlier (Section~\ref{sec:cd}). They create a copy of a table (including its contents) and record modifications to records in the original table using triggers into a special ``deltas'' table. Once they have copied the original table and its contents, they apply the specified schema operations to the ghost table before proceeding to replay the recorded modifications from the ``deltas'' table onto the ghost table. When the ``deltas'' table is almost empty, these tools acquire an exclusive write lock on the original table --- like \textit{TableMigrator} does --- and apply the last of the recorded modifications before atomically switch the names of both tables.
 
 \subsection{Research}
 
 \subsubsection{Imago}
-Imago~\cite{Dumitras:2009:WUF:1656980.1657005} is a tool which follows approach 2. With Imago there are two production environments, called ``universes'' by the authors. Imago integrates with the application and its environment at both the ingress point (load balancer) to be able to switch users from one ``universe'' to the other, and at the egress point where the (web) application sends queries to the SQL database. When a new version of the application (requiring a change to the database schema) needs to be deployed, Imago bootstraps the inactive production environment with a copy of the active database, applies the required schema operations and then copies over the data from the old universe to the new universe. When this process is almost complete, it enforces a short period of read-only access to the SQL database, while it is switching users from the old ``universe'' to the new ``universe'' using the load balancer. Imago makes no claims in regards to its support for foreign keys.
+Imago~\cite{Dumitras:2009:WUF:1656980.1657005} is a tool which follows Approach~2. With Imago there are two production environments, called ``universes''. Imago integrates with the application and its environment at both the ingress point (load balancer) to be able to switch users from one ``universe'' to the other, and at the egress point where the (web) application sends queries to the SQL database. When a new version of the application (requiring a change to the database schema) needs to be deployed, Imago bootstraps the inactive production environment with a copy of the active database, applies the required schema operations and then copies over the data from the old universe to the new universe. When this process is almost complete, it enforces a short period of read-only access to the SQL database, while it is switching users from the old ``universe'' to the new ``universe'' using the load balancer. Imago makes no claims in regards to its support for foreign keys.
 
 \subsection{Limitations} 
 
 \begin{itemize}
-  \item{None of the tools used in practice support foreign keys and primarily focus on MySQL databases.}
-  \item{These tools are very limited in the sense that they often only support making small changes to the existing database schema. This forces software and release engineers to often release intermediate versions of the application, as the schema is altered in several steps.}
+  \item None of the tools used in practice support foreign keys.
+  \item The tools primarily focus on MySQL databases.
+  \item These tools are limited in the sense that they typically only support making small changes to the existing database schema. This forces software and release engineers to often release intermediate versions of the application, as the schema is altered in several steps.
 \end{itemize}
 
-\section{Our approach} %(1.0)
+\section{Proposed Approach} %(1.0)
 
 \subsection{Vision}
 
@@ -508,19 +517,20 @@ We feel that the current situation is an impediment to the adoption of \textit{C
   \item{Foreign keys are an integral part of SQL databases and should be supported.}
 \end{itemize}
 
-\subsection{Solution direction}
+\subsection{Solution Direction}
 
-The previously discussed tools from practice all use approach 1 or a variation of it. They prove that this is a viable way for simple evolutions of the database schema. However where these tools all create a single ghost table, we aim to create one ghost table for each table that is under change, and ghost tables for all tables which in turn are dependent on these tables under change. For instance adding a new non-nullable column ``summary'' to the ``books'' table (see Figure~\ref{fig:migration-stages}), means we should also create a ghost table for the ``publications`` table since there is a foreign key pointing from the ``publications'' table to the ``books'' table. The other tables do not require ghost tables, as they do not have any foreign keys referencing either the ``books'' or ``publications'' table. This approach ensures that we can support foreign keys.
+The previously discussed tools from practice all use Approach~1 or a variation of it. They prove that this is a viable way for simple evolutions of the database schema. However where these tools all create a single ghost table, we aim to create one ghost table for each table that is under change, and ghost tables for all tables which in turn are dependent on these tables under change. For instance adding a new non-nullable column ``summary'' to the ``books'' table (see Figure~\ref{fig:migration-stages}), means we should also create a ghost table for the ``publications`` table since there is a foreign key pointing from the ``publications'' table to the ``books'' table. The other tables do not require ghost tables, as they do not have any foreign keys referencing either the ``books'' or ``publications'' table. This approach ensures that we can support foreign keys.
 
 In addition, the tools from practice all allow release engineers to switch the table names manually after the the original and the ghost table have been synchronized. This allows for two or more versions of the application to co-exist on the same database as long as each version correctly queries the correct (ghost) table. Although the current tools from practice do not solve this specific problem, we think that this is easily solved using a small wrapper around database drivers for most programming languages.
 
 Finally, with this approach it is possible to perform several schema evolutions at once. In the example, we could for instance also add even more columns to either the ``books'' or ``publications'' table.
 
-\section{Implementation status} %(0.5)
+\section{Implementation Status} %(0.5)
 
-\subsection{Current status}
+\subsection{Current Status}
 
-We have started implementing a new tool --- QuantumDB~\cite{QuantumDB} --- which following this approach. The aim is to make \textit{Continuous Deployment} more attainable for software and release engineers with respect to applications relying on SQL databases. Although not yet ready for production environments, we have implemented enough to perform a quick evaluation in an small experiment. 
+We are in the process of implementing and experimenting with the approach just described via a new tool that we have named QuantumDB~\cite{QuantumDB}.
+The aim is to make \textit{Continuous Deployment} more attainable for software and release engineers for applications relying on SQL databases. Although not yet ready for production environments, we have implemented enough to perform a quick evaluation in a small experiment. 
 
 \begin{figure}%
     \centering
@@ -535,22 +545,22 @@ We have started implementing a new tool --- QuantumDB~\cite{QuantumDB} --- which
 
 QuantumDB currently consists of two parts: 
 \begin{itemize}
-  \item{\textbf{core} is the program responsible for performing the actual migration tasks on the database. It does this by creating ghost tables of tables under change, using triggers to keep the ghost tables and the original tables synchronized with each other, and a background task which copies the data from the original tables to the ghost tables in small batches to prevent degrading the performance of the database.}
-  \item{\textbf{driver} is a Java JDBC driver which can wrap another JDBC driver. When used, the software engineers can specify a database schema version on which that version of their application operates. The driver then rewrites SQL queries sent to it by the application, and passes them on to the wrapped database JDBC driver which in turn sends them to the database. When rewriting queries, it replaces table names with the names of the associated (ghost) table names where applicable.}
+  \item{\textbf{qdb:core} is the program responsible for performing the actual migration tasks on the database. It does this by creating ghost tables of tables under change, using triggers to keep the ghost tables and the original tables synchronized with each other, and a background task which copies the data from the original tables to the ghost tables in small batches to prevent degrading the performance of the database.}
+  \item{\textbf{qdb:driver} is a Java JDBC driver which can wrap another JDBC driver. When used, the software engineers can specify a database schema version on which that version of their application operates. The driver then rewrites SQL queries sent to it by the application, and passes them on to the wrapped database JDBC driver which in turn sends them to the database. When rewriting queries, it replaces table names with the names of the associated (ghost) table names where applicable.}
 \end{itemize}
 
 With QuantumDB we can currently take one of the active database schemas, apply an arbitrary number of schema operations to it, and expose the resulting database schema in addition to the original database schema. Once the last application connected to a particular version of the database schema disconnects, the tables associated with that database schema version can be safely discarded.
 
-\section{Initial measurements} %(0.5)
+\section{Initial Measurements} %(0.5)
 
-We feel it is important to validate our work at an early stage. Although the development of QuantumDB is still ongoing, we setup a small experiment to verify that the concept and our implementation of it works. 
+In order to validate our work at an early stage we have setup a small experiment to verify that the proposed approach and our implementation of it behaves as expected. 
 
 \subsection{Setup}
-We have installed PostgreSQL 9.3 and a small test application --- made available on GitHub~\cite{QuantumDB-RelEng-Demo} --- on a server with a 4-core Intel Core i7-3770, a 1TB hard disk, and 16GB memory. The test application inserts 50 million records into a single table called ``users'' and starts a simple demo application with two threads which continuously query and manipulate the data in that table using SELECT, INSERT, UPDATE, and DELETE statements. It then uses one of two methods to add a non nullable column to the ``users'' table. During this process we keep track of the duration of the queries issued by the demo application and how long each method takes to complete. 
+We have installed PostgreSQL 9.3 and a small test application --- made available on GitHub~\cite{QuantumDB-RelEng-Demo} --- on a server with a 4-core Intel Core i7-3770, a 1TB hard disk, and 16GB memory. The test application inserts 50 million records into a single table called ``users'' and starts a simple demo application with two threads which continuously query and manipulate the data in that table using SELECT, INSERT, UPDATE, and DELETE statements. It then uses one of two methods to add a non-nullable column to the ``users'' table. During this process we keep track of the duration of the queries issued by the demo application and how long each method takes to complete. 
 
 The ``naive'' approach simply executes an ``ALTER TABLE users ADD COLUMN'' statement to add the new column to the database. Once this statement has completed, we can start a new demo application which can operate on the new structure of the ``users'' table. Since the new structure of the ``users'' table is compatible with both the old and the new version of the demo application they can run in parallel to each other, allowing for any kind of deployment method to be used. 
 
-The second approach uses QuantumDB to add the new column. It first creates a ghost table based on the ``users'' table with the new column. It then iteratively copies records from the ``users'' table to the ghost table in batches of 2,000 records at intervals of 50 milliseconds. With this we attempt to avoid negatively affecting the performance of the queries issued by the demo application while we are copying the records. Unlike with the previous approach, with this approach the demo applications use the QuantumDB JDBC driver which expose each demo application to a different version of the database schema (containing either the ``users'' table or the ghost table). The driver ensures that each query is rewritten in such a way that the correct table is queried for that specific version of the schema.
+The second approach uses QuantumDB to add the new column. It first creates a ghost table based on the ``users'' table with the new column. It then iteratively copies records from the ``users'' table to the ghost table in batches of 2,000 records at intervals of 50 milliseconds. With this we attempt to avoid negatively affecting the performance of the queries issued by the demo application while we are copying the records. Unlike with the previous approach, with this approach the demo applications use the QuantumDB JDBC driver which exposes each demo application to a different version of the database schema (containing either the ``users'' table or the ghost table). The driver ensures that each query is rewritten in such a way that the correct table is queried for that specific version of the schema.
 
 
 \subsection{Results}
@@ -567,7 +577,7 @@ The total migration time for the ``naive'' approach was 2 minutes and 26 seconds
     \label{fig:migration}%
 \end{figure}
 
-It is worth noting that we have not invested any time in improving the performance of QuantumDB or reducing the performance impact it has on the database and its clients. During this experiment we noticed that the hard disk was periodically unable to write data to disk quickly enough. As a result queries were taking significantly longer than normal to complete. We are confident that we can greatly reduce this by tweaking the PostgreSQL config, or switching to a faster hard disk.
+It is worth noting that we have not invested any time in improving the performance of QuantumDB or reducing the performance impact it has on the database and its clients. During this experiment we noticed that the hard disk was periodically unable to write data to disk quickly enough. As a result queries were taking significantly longer than normal to complete. We are confident that we can greatly reduce this by tweaking the PostgreSQL config, switching to a faster hard disk, or lowering the rate of migration during the copy phase.
 
 \section{Road ahead}
 As stated before, work on QuantumDB is not finished. To be able to use QuantumDB effectively in production environments we still need to work on the following issues: 
